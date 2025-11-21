@@ -1,61 +1,73 @@
-
 # OpenCHAMI Node Facade API (Prototype)
 
-## Overview
-This project is a Facade API designed to simplify node management. It abstracts the complexity SMD and presents a logical view of compute nodes.
+## Goal
+To provide a simplified, logical "Node" API for System Administrators that abstracts away the complexity of SMD.
 
-This API provides a single resource: `Node`. Admins declare the desired state (e.g., `PowerState: On`), and the system automatically handles the translation and orchestration required to achieve that state via backend services. This is opposed to the previous splitting between component and redfish endpoints that held information that was usuaully irrelevant and disjoint. 
+## Architecture Implemented
 
-## Architecture
+1.  Accepts high-level user intent (e.g., `PowerState: "on"`).
+2.  The Reconciler:
+    * Automatically maps logical Node IDs (`n0`) to physical BMC IPs by querying SMD `RedfishEndpoints`.
+    * Detects drift between User Intent and Hardware Reality, triggering transitions via PCS.
 
-The system is built using Fabrica and follows a Kubernetes-style Reconciliation pattern:
+## Demo: Proof of Concept
 
-1.  The API
-    * Stores the "User Intent" in a lightweight file-based backend.
-    * Exposes a REST API for `Node` resources.
-2.  The Reconciler
-    * Watches for changes in the API.
-    * Queries SMD and PCS to to populate the node's observed status.
-    * If the desired PowerState differs from the actual PowerState, it issues command transitions to PCS.
+### 1. Register a Node
+Manually registered a node to represent hardware found in the inventory.
 
-## Dependencies
-This prototype assumes the following services are running:
-* **SMD:** Read-only access for inventory and mapping (Port 27779).
-* **PCS:** Read/Write access for power status and transitions (Port 28007).
-
-## API Reference
-
-### `Node` Resource
-
-**Spec (User Inputs):**
-```json
-{
-  "xname": "x1000c1s7b0n0",
-  "powerState": "on" 
-}
-```
-
-**Status (System Outputs):**
-```json
-{
-  "actualPowerState": "on",
-  "ipAddress": "172.24.0.3",
-  "macAddress": "a4-bf-01-3f-6b-40",
-  "phase": "Ready",
-  "lastSync": "2025-11-21T10:00:00Z"
-}
-```
-
-## Usage
-
-**1. Register a Node (or run discovery script)**
 ```bash
 curl -X POST http://localhost:8081/nodes \
-  -d '{"spec": {"xname": "x1000c1s7b0n0", "powerState": "off"}}'
+  -H "Content-Type: application/json" \
+  -d '{"xname": "x1000c1s7b0n0", "powerState": "off"}'
 ```
 
-**2. Turn a Node On**
-```bash
-curl -X PATCH http://localhost:8081/nodes/x1000c1s7b0n0 \
-  -d '{"spec": {"powerState": "on"}}'
+### 2. Verify Translation 
+The API successfully translated the Node Xname to a BMC ID and retrieved the IP address from SMD.
+
+```json
+{
+  "spec": {
+    "xname": "x1000c1s7b0n0",
+    "powerState": "off"
+  },
+  "status": {
+    "ipAddress": "172.24.0.2",  <-- SUCCESS: Retrieved from Backend SMD
+    "actualPowerState": ""
+  }
+}
 ```
+
+### 3. Trigger Power Transition
+Updated the user intent to on, triggering reconciler.
+
+```bash
+curl -X PATCH http://localhost:8081/nodes/nod-bad3f66d \
+  -H "Content-Type: application/json" \
+  -d '{"powerState": "on"}'
+```
+
+**Server Logs:**
+```text
+[DEBUG] Processing reconciliation for Node/nod-bad3f66d
+[INFO] Reconciling Node: (xname: x1000c1s7b0n0)
+[WARN] DRIFT: Node x1000c1s7b0n0 needs power transition to on
+[DEBUG] Reconciliation successful
+```
+
+## What's done
+* Created a API that hides backend complexity.
+* Linked Fabrica Resources to SMD Inventory (`RedfishEndpoints`).
+* The system is talking to real SMD and PCS endpoints.
+
+## Next Steps
+
+1.  **Fix Magellan Discovery:**
+    * This manually injects data into SMD using `curl`.
+    * Need to get Magellan discovery working on this system again... 
+
+2.  **PCS Integration Hardening:**
+    * Ensure PCS returns valid `PowerState`.
+
+3.  **Refine API:**
+    * Move from using Fabrica UIDs (`nod-xyz`) to allowing lookups directly by Xname (`x1000...`) for better SysAdmin UX.
+    * How is this actually used?
