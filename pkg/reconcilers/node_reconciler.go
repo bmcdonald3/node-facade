@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"bytes"
+	"io"
 
 	"github.com/example/inventory-v3/pkg/resources/node"
 )
@@ -58,7 +60,21 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) erro
 		res.Status.Ready = false
 		
 		r.Logger.Warnf("DRIFT: Node %s needs power transition to %s", res.Spec.Xname, res.Spec.PowerState)
-        // We will implement the Write logic here in the next step
+
+		// --- STEP 3 ADDITION: WRITE LOGIC ---
+		// We only act if we have a valid target state and the backend is responsive
+		if res.Status.ActualPowerState != "unknown" {
+			err := r.sendPCSTransition(ctx, res.Spec.Xname, res.Spec.PowerState)
+			if err != nil {
+				r.Logger.Errorf("Failed to trigger transition: %v", err)
+				res.Status.Message = fmt.Sprintf("Transition failed: %v", err)
+				// Don't return error, just report it in status. We'll retry next loop.
+			} else {
+				res.Status.Message = fmt.Sprintf("Transition to %s started", res.Spec.PowerState)
+			}
+		}
+		// ------------------------------------
+
 	} else {
 		res.Status.Phase = "Ready"
 		res.Status.Message = "Node is consistent"
@@ -157,6 +173,44 @@ func (r *NodeReconciler) getPCSStatus(ctx context.Context, xname string) (string
 	}
 
 	return pcsData.Status[0].PowerState, nil
+}
+
+// sendPCSTransition calls PCS to change the power state
+func (r *NodeReconciler) sendPCSTransition(ctx context.Context, xname, state string) error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	url := "http://localhost:28007/v1/transitions"
+
+	// Capitalize state for PCS (on -> On, off -> Off)
+	// Simple helper to uppercase first letter
+	pcsState := strings.Title(strings.ToLower(state))
+	if state == "off" {
+		pcsState = "Off" // PCS often prefers "Off" or "Force-Off"
+	}
+
+	payload := map[string]interface{}{
+		"operation": pcsState,
+		"location": []map[string]string{
+			{"xname": xname},
+		},
+	}
+	
+	data, _ := json.Marshal(payload)
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		// Read body for error message
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PCS error %d: %s", resp.StatusCode, string(body))
+	}
+	
+	return nil
 }
 
 // --- JSON Structs for External Services ---
