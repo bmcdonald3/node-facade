@@ -52,7 +52,7 @@ This prototype assumes the following services are running:
 ```bash
 curl -X POST http://localhost:8080/nodes \
   -d '{"spec": {"xname": "x1000c1s7b0n0", "powerState": "off"}}'
-TODO add tick marks
+```
 
 **2. Turn a Node On**
 ```bash
