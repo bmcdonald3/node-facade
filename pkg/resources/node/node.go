@@ -6,6 +6,7 @@ package node
 
 import (
 	"context"
+	"time"
 	"github.com/openchami/fabrica/pkg/resource"
 )
 
@@ -23,7 +24,6 @@ type NodeSpec struct {
 	// PowerState is the desired power state of the node.
 	// Changing this field triggers the Reconciler to call PCS.
 	PowerState string `json:"powerState" validate:"required,oneof=on off"`
-}
 }
 
 // NodeStatus defines the observed state of Node
