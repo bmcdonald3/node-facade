@@ -8,72 +8,136 @@ package reconcilers
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/example/inventory-v3/pkg/resources/node"
 )
 
 // reconcileNode contains custom reconciliation logic.
-//
-// This method is called by the generated Reconcile() orchestration method.
-// Implement Node-specific reconciliation logic here.
-//
-// Guidelines:
-//  1. Keep this method idempotent (safe to call multiple times)
-//  2. Update Status fields to reflect observed state
-//  3. Emit events for significant state changes using r.EmitEvent()
-//  4. Use r.Logger for debugging (Infof, Warnf, Errorf, Debugf)
-//  5. Return errors for transient failures (will retry with backoff)
-//  6. Access storage via r.Client (Get, List, Update, Create, Delete)
-//
-// Example implementation patterns:
-//
-// For hardware resources (BMC, Node):
-//   - Connect to hardware endpoint
-//   - Query current state
-//   - Update Status.Connected, Status.Version, Status.Health
-//   - Emit events when state changes
-//
-// For hierarchical resources (Rack, Chassis):
-//   - Create/reconcile child resources
-//   - Update Status with child counts and references
-//   - Emit events when topology changes
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts
-//   - res: The Node resource to reconcile
-//
-// Returns:
-//   - error: If reconciliation failed (will trigger retry with backoff)
 func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) error {
-	// TODO: Implement Node-specific reconciliation logic
-	//
-	// Example:
-	//
-	//   // 1. Read desired state from Spec
-	//   desiredAddress := res.Spec.Address
-	//
-	//   // 2. Observe actual state (e.g., connect to hardware)
-	//   actualState, err := r.observeActualState(ctx, res)
-	//   if err != nil {
-	//       return fmt.Errorf("failed to observe state: %w", err)
-	//   }
-	//
-	//   // 3. Update Status with observed state
-	//   res.Status.Connected = actualState.Connected
-	//   res.Status.Version = actualState.Version
-	//   res.Status.LastSeen = time.Now().Format(time.RFC3339)
-	//
-	//   // 4. Emit events for significant changes
-	//   if !wasConnected && res.Status.Connected {
-	//       eventType := "io.openchami.inventory.nodes.connected"
-	//       if err := r.EmitEvent(ctx, eventType, res); err != nil {
-	//           r.Logger.Warnf("Failed to emit event: %v", err)
-	//       }
-	//   }
-	//
-	//   return nil
+	r.Logger.Infof("Reconciling Node: %s (xname: %s)", res.Metadata.Name, res.Spec.Xname)
 
-	r.Logger.Infof("Node reconciliation not yet implemented for %s", res.GetUID())
+	// 1. Observer Phase: Query External Systems (SMD & PCS)
+	
+	// A. Fetch Inventory from SMD
+	smdInfo, err := r.getSMDInfo(ctx, res.Spec.Xname)
+	if err != nil {
+		// Log error but continue - we might still be able to get PCS status
+		r.Logger.Errorf("Failed to get SMD info: %v", err)
+		res.Status.Message = fmt.Sprintf("SMD Error: %v", err)
+	} else {
+		// Map SMD data to our Status
+		res.Status.IPAddress = smdInfo.RedfishEndpointFQDN
+		if len(smdInfo.RedfishSystemInfo.EthernetNICInfo) > 0 {
+			res.Status.MACAddress = smdInfo.RedfishSystemInfo.EthernetNICInfo[0].MACAddress
+		}
+	}
 
+	// B. Fetch Power Status from PCS
+	pcsStatus, err := r.getPCSStatus(ctx, res.Spec.Xname)
+	if err != nil {
+		r.Logger.Errorf("Failed to get PCS status: %v", err)
+		res.Status.Phase = "PowerStatusError"
+		res.Status.Message = fmt.Sprintf("PCS Error: %v", err)
+		// Return error to trigger a retry with backoff
+		return err
+	}
+	
+	// Update Status with PCS reality
+	res.Status.ActualPowerState = pcsStatus
+	res.Status.LastSync = time.Now()
+
+	// 2. Decision Phase: Check for Drift
+	if strings.ToLower(res.Spec.PowerState) != strings.ToLower(res.Status.ActualPowerState) {
+		res.Status.Phase = "Syncing"
+		res.Status.Message = fmt.Sprintf("Drift detected: Want %s, Have %s", res.Spec.PowerState, res.Status.ActualPowerState)
+		res.Status.Ready = false
+		
+		r.Logger.Warnf("DRIFT: Node %s needs power transition to %s", res.Spec.Xname, res.Spec.PowerState)
+        // We will implement the Write logic here in the next step
+	} else {
+		res.Status.Phase = "Ready"
+		res.Status.Message = "Node is consistent"
+		res.Status.Ready = true
+	}
+
+    // Return nil to indicate success. 
+    // The controller will check again after the configured 'requeue_delay' (default 5s).
 	return nil
+}
+
+// --- Helper Functions & External API Structs ---
+
+// getSMDInfo calls SMD to get component endpoint details
+func (r *NodeReconciler) getSMDInfo(ctx context.Context, xname string) (*SMDResponse, error) {
+    client := &http.Client{Timeout: 5 * time.Second}
+	url := fmt.Sprintf("http://localhost:27779/hsm/v2/Inventory/ComponentEndpoints/%s", xname)
+	
+    req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("SMD returned status: %s", resp.Status)
+	}
+
+	var smdData SMDResponse
+	if err := json.NewDecoder(resp.Body).Decode(&smdData); err != nil {
+		return nil, err
+	}
+	return &smdData, nil
+}
+
+// getPCSStatus calls PCS to get power status
+func (r *NodeReconciler) getPCSStatus(ctx context.Context, xname string) (string, error) {
+    client := &http.Client{Timeout: 5 * time.Second}
+	url := fmt.Sprintf("http://localhost:28007/v1/power-status?xname=%s", xname)
+	
+    req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("PCS returned status: %s", resp.Status)
+	}
+
+	var pcsData PCSStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pcsData); err != nil {
+		return "", err
+	}
+
+	if len(pcsData.Status) == 0 {
+		return "unknown", nil
+	}
+
+	return pcsData.Status[0].PowerState, nil
+}
+
+// --- JSON Structs for External Services ---
+
+type SMDResponse struct {
+	ID                 string `json:"ID"`
+	RedfishEndpointFQDN string `json:"RedfishEndpointFQDN"`
+	RedfishSystemInfo   struct {
+		EthernetNICInfo []struct {
+			MACAddress string `json:"MACAddress"`
+		} `json:"EthernetNICInfo"`
+	} `json:"RedfishSystemInfo"`
+}
+
+type PCSStatusResponse struct {
+	Status []struct {
+		Xname      string `json:"xname"`
+		PowerState string `json:"powerState"`
+	} `json:"status"`
 }
