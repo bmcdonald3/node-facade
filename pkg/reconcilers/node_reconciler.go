@@ -72,27 +72,63 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) erro
 
 // --- Helper Functions & External API Structs ---
 
-// getSMDInfo calls SMD to get component endpoint details
+// getSMDInfo calls SMD to get details from the RedfishEndpoint (BMC)
+// because that is the only table we have populated right now.
 func (r *NodeReconciler) getSMDInfo(ctx context.Context, xname string) (*SMDResponse, error) {
+    // 1. Convert Node Xname (x1000c1s7b0n0) to BMC Xname (x1000c1s7b0)
+    // We assume the simple case where we just strip the last 2 chars (n0)
+    bmcXname := xname
+    if len(xname) > 2 && strings.HasSuffix(xname, "n0") {
+        bmcXname = xname[:len(xname)-2]
+    }
+
     client := &http.Client{Timeout: 5 * time.Second}
-	url := fmt.Sprintf("http://localhost:27779/hsm/v2/Inventory/ComponentEndpoints/%s", xname)
-	
+    
+    // TARGETING THE TABLE THAT HAS DATA
+    url := fmt.Sprintf("http://localhost:27779/hsm/v2/Inventory/RedfishEndpoints/%s", bmcXname)
+    
     req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("SMD returned status: %s", resp.Status)
-	}
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("SMD returned status: %s", resp.Status)
+    }
 
-	var smdData SMDResponse
-	if err := json.NewDecoder(resp.Body).Decode(&smdData); err != nil {
-		return nil, err
-	}
-	return &smdData, nil
+    // 2. Decode the RedfishEndpoint response
+    var smdData SMDRedfishEndpoint
+    if err := json.NewDecoder(resp.Body).Decode(&smdData); err != nil {
+        return nil, err
+    }
+
+    // 3. Convert to our internal generic response format
+    return &SMDResponse{
+        ID: smdData.ID,
+        RedfishEndpointFQDN: smdData.IPAddress, // Using IPAddress from your JSON
+    }, nil
+}
+
+// --- Updated Structs ---
+
+// The struct that matches YOUR SPECIFIC JSON output
+type SMDRedfishEndpoint struct {
+    ID        string `json:"ID"`
+    FQDN      string `json:"FQDN"`
+    IPAddress string `json:"IPAddress"` // We added this field
+}
+
+// Our internal common struct
+type SMDResponse struct {
+    ID                 string
+    RedfishEndpointFQDN string
+    RedfishSystemInfo   struct {
+        EthernetNICInfo []struct {
+            MACAddress string
+        }
+    }
 }
 
 // getPCSStatus calls PCS to get power status
@@ -124,16 +160,6 @@ func (r *NodeReconciler) getPCSStatus(ctx context.Context, xname string) (string
 }
 
 // --- JSON Structs for External Services ---
-
-type SMDResponse struct {
-	ID                 string `json:"ID"`
-	RedfishEndpointFQDN string `json:"RedfishEndpointFQDN"`
-	RedfishSystemInfo   struct {
-		EthernetNICInfo []struct {
-			MACAddress string `json:"MACAddress"`
-		} `json:"EthernetNICInfo"`
-	} `json:"RedfishSystemInfo"`
-}
 
 type PCSStatusResponse struct {
 	Status []struct {
