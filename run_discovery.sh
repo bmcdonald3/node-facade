@@ -29,7 +29,7 @@ echo "Collecting inventory from $BMC_IP..."
 magellan collect "https://${BMC_IP}" \
     --username "${BMC_USER}" \
     --password "${BMC_PASS}" \
-    -v \
+    --log-level debug \
     | magellan send http://localhost:27779
 
 echo -e "\n>>> STEP 3: Verifying SMD Data..."
