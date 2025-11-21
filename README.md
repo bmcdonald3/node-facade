@@ -50,12 +50,12 @@ This prototype assumes the following services are running:
 
 **1. Register a Node (or run discovery script)**
 ```bash
-curl -X POST http://localhost:8080/nodes \
+curl -X POST http://localhost:8081/nodes \
   -d '{"spec": {"xname": "x1000c1s7b0n0", "powerState": "off"}}'
 ```
 
 **2. Turn a Node On**
 ```bash
-curl -X PATCH http://localhost:8080/nodes/x1000c1s7b0n0 \
+curl -X PATCH http://localhost:8081/nodes/x1000c1s7b0n0 \
   -d '{"spec": {"powerState": "on"}}'
 ```
