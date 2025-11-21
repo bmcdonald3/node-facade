@@ -1,5 +1,29 @@
 # OpenCHAMI Node Facade API (Prototype)
 
+## Steps
+
+1. Run OpenCHAMI services and Fabrica API
+2. Populate manually:
+```bash
+curl -X POST http://localhost:8081/nodes \
+  -H "Content-Type: application/json" \
+  -d '{"xname": "x1000c1s7b0n0", "powerState": "off"}'
+```
+3. Check that Fabrica retrieved the IP (172.24.0.2) from the backend.
+```bash
+curl http://localhost:8081/nodes | jq
+```
+4. Switch power state to on
+```bash
+curl -X PATCH http://localhost:8081/nodes/nod-bad3f66d \
+  -H "Content-Type: application/json" \
+  -d '{"powerState": "on"}'
+```
+5. Check the drift detection (power state should be on, but server logs should indicate it's a drift)
+```bash
+curl http://localhost:8081/nodes/nod-bad3f66d | jq
+```
+
 ## Goal
 To provide a simplified, logical "Node" API for System Administrators that abstracts away the complexity of SMD.
 
