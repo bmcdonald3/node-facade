@@ -23,6 +23,7 @@ magellan crawl "https://${BMC_IP}:443" \
     --insecure \
     --timeout 30 \
     --log-level debug \
+    --show \
     | magellan send http://localhost:27779
 
 echo -e "\n>>> STEP 3: Verifying SMD Data..."
