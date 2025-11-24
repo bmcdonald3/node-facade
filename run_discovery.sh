@@ -18,21 +18,18 @@ docker exec -e VAULT_TOKEN=$VAULT_TOKEN vault vault secrets enable -path "secret
 docker exec -e VAULT_TOKEN=$VAULT_TOKEN vault vault kv put secret/hms-creds/x1000c1s7b0 username=$BMC_USER password=$BMC_PASS
 
 echo -e "\n>>> STEP 2: Scanning Network (Populating Cache)..."
-
-echo "Scanning $BMC_IP..."
 magellan scan "https://${BMC_IP}:443" \
     --cache "${CACHE_FILE}" \
-    --verbose
+    --insecure \
+    --log-level debug
 
 echo -e "\n>>> STEP 3: Collecting Inventory..."
-
 magellan collect \
     --cache "${CACHE_FILE}" \
     --username "${BMC_USER}" \
     --password "${BMC_PASS}" \
-    --verbose \
+    --log-level debug \
     | magellan send http://localhost:27779
 
 echo -e "\n>>> STEP 4: Verifying SMD Data..."
-curl -sS http://localhost:27779/hsm/v2/Inventory/RedfishEndpoints | jq .
 curl -sS http://localhost:27779/hsm/v2/Inventory/ComponentEndpoints | jq .
