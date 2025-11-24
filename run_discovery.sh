@@ -1,43 +1,38 @@
 #!/bin/bash
 set -e
 
-# --- CONFIGURATION ---
 BMC_IP="172.24.0.2"
 BMC_USER="root"
 BMC_PASS="initial0"
-BMC_XNAME="x1000c1s7b0" 
+CACHE_FILE="/tmp/magellan_assets.db"
 
-echo ">>> STEP 1: Configuring Vault Secrets..."
+# Ensure we start fresh
+rm -f $CACHE_FILE
+
+echo ">>> STEP 1: Configuring Vault..."
 export VAULT_ADDR=http://127.0.0.1:8200
 export VAULT_TOKEN=hms
 
-# 1. Enable the secret engine
+# Enable secrets and write credentials (so PCS works later)
 docker exec -e VAULT_TOKEN=$VAULT_TOKEN vault vault secrets enable -path "secret/hms-creds" -version=1 kv > /dev/null 2>&1 || true
+docker exec -e VAULT_TOKEN=$VAULT_TOKEN vault vault kv put secret/hms-creds/x1000c1s7b0 username=$BMC_USER password=$BMC_PASS
 
-# 2. Write the credentials
-echo "Writing credentials for $BMC_XNAME..."
-docker exec -e VAULT_TOKEN=$VAULT_TOKEN vault vault kv put secret/hms-creds/$BMC_XNAME username=$BMC_USER password=$BMC_PASS
+echo -e "\n>>> STEP 2: Scanning Network (Populating Cache)..."
 
-echo -e "\n>>> STEP 2: Running Magellan Discovery..."
+echo "Scanning $BMC_IP..."
+magellan scan "https://${BMC_IP}:443" \
+    --cache "${CACHE_FILE}" \
+    --verbose
 
-if ! command -v magellan &> /dev/null; then
-    echo "Error: 'magellan' command not found."
-    exit 1
-fi
+echo -e "\n>>> STEP 3: Collecting Inventory..."
 
-echo "Collecting inventory from $BMC_IP..."
-magellan collect "https://${BMC_IP}" \
+magellan collect \
+    --cache "${CACHE_FILE}" \
     --username "${BMC_USER}" \
     --password "${BMC_PASS}" \
-    --log-level debug \
+    --verbose \
     | magellan send http://localhost:27779
 
-echo -e "\n>>> STEP 3: Verifying SMD Data..."
-
-echo "Checking for Redfish Endpoint (BMC):"
+echo -e "\n>>> STEP 4: Verifying SMD Data..."
 curl -sS http://localhost:27779/hsm/v2/Inventory/RedfishEndpoints | jq .
-
-echo "Checking for Component Endpoint (Node):"
-curl -sS "http://localhost:27779/hsm/v2/Inventory/ComponentEndpoints" | jq .
-
-echo -e "\n>>> DONE!"
+curl -sS http://localhost:27779/hsm/v2/Inventory/ComponentEndpoints | jq .
