@@ -37,6 +37,7 @@ magellan collect \
     --password "${BMC_PASS}" \
     --timeout 30 \
     --log-level debug \
+    --show \
     | magellan send http://localhost:27779
 
 echo -e "\n>>> STEP 4: Verifying SMD Data..."
