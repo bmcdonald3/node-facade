@@ -7,14 +7,14 @@
 package reconcilers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
-	"bytes"
-	"io"
 
 	"github.com/example/inventory-v3/pkg/resources/node"
 )
@@ -24,7 +24,7 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) erro
 	r.Logger.Infof("Reconciling Node: %s (xname: %s)", res.Metadata.Name, res.Spec.Xname)
 
 	// 1. Observer Phase: Query External Systems (SMD & PCS)
-	
+
 	// A. Fetch Inventory from SMD
 	smdInfo, err := r.getSMDInfo(ctx, res.Spec.Xname)
 	if err != nil {
@@ -34,9 +34,8 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) erro
 	} else {
 		// Map SMD data to our Status
 		res.Status.IPAddress = smdInfo.RedfishEndpointFQDN
-		if len(smdInfo.RedfishSystemInfo.EthernetNICInfo) > 0 {
-			res.Status.MACAddress = smdInfo.RedfishSystemInfo.EthernetNICInfo[0].MACAddress
-		}
+		// FIX: Use the flattened field directly
+		res.Status.MACAddress = smdInfo.MACAddress
 	}
 
 	// B. Fetch Power Status from PCS
@@ -48,7 +47,7 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) erro
 		// Return error to trigger a retry with backoff
 		return err
 	}
-	
+
 	// Update Status with PCS reality
 	res.Status.ActualPowerState = pcsStatus
 	res.Status.LastSync = time.Now()
@@ -58,22 +57,19 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) erro
 		res.Status.Phase = "Syncing"
 		res.Status.Message = fmt.Sprintf("Drift detected: Want %s, Have %s", res.Spec.PowerState, res.Status.ActualPowerState)
 		res.Status.Ready = false
-		
+
 		r.Logger.Warnf("DRIFT: Node %s needs power transition to %s", res.Spec.Xname, res.Spec.PowerState)
 
-		// --- STEP 3 ADDITION: WRITE LOGIC ---
-		// We only act if we have a valid target state and the backend is responsive
+		// WRITE LOGIC: Only act if we have a valid target state
 		if res.Status.ActualPowerState != "unknown" {
 			err := r.sendPCSTransition(ctx, res.Spec.Xname, res.Spec.PowerState)
 			if err != nil {
 				r.Logger.Errorf("Failed to trigger transition: %v", err)
 				res.Status.Message = fmt.Sprintf("Transition failed: %v", err)
-				// Don't return error, just report it in status. We'll retry next loop.
 			} else {
 				res.Status.Message = fmt.Sprintf("Transition to %s started", res.Spec.PowerState)
 			}
 		}
-		// ------------------------------------
 
 	} else {
 		res.Status.Phase = "Ready"
@@ -81,68 +77,54 @@ func (r *NodeReconciler) reconcileNode(ctx context.Context, res *node.Node) erro
 		res.Status.Ready = true
 	}
 
-    // Return nil to indicate success. 
-    // The controller will check again after the configured 'requeue_delay' (default 5s).
+	// Return nil to indicate success.
 	return nil
 }
 
 // --- Helper Functions & External API Structs ---
 
+// getSMDInfo calls SMD to get details from the ComponentEndpoint (The Golden Record)
 func (r *NodeReconciler) getSMDInfo(ctx context.Context, xname string) (*SMDResponse, error) {
-    client := &http.Client{Timeout: 5 * time.Second}
-    
-    url := fmt.Sprintf("http://localhost:27779/hsm/v2/Inventory/ComponentEndpoints/%s", xname)
-    
-    req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-    resp, err := client.Do(req)
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
+	client := &http.Client{Timeout: 5 * time.Second}
 
-    if resp.StatusCode != http.StatusOK {
-        return nil, fmt.Errorf("SMD returned status: %s", resp.Status)
-    }
+	// CORRECT URL: Pointing to the rich view we just populated
+	url := fmt.Sprintf("http://localhost:27779/hsm/v2/Inventory/ComponentEndpoints/%s", xname)
 
-    var smdData SMDComponentEndpoint
-    if err := json.NewDecoder(resp.Body).Decode(&smdData); err != nil {
-        return nil, err
-    }
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-    mac := ""
-    if len(smdData.RedfishSystemInfo.EthernetNICInfo) > 0 {
-        mac = smdData.RedfishSystemInfo.EthernetNICInfo[0].MACAddress
-    }
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("SMD returned status: %s", resp.Status)
+	}
 
-    return &SMDResponse{
-        ID:                  smdData.ID,
-        RedfishEndpointFQDN: smdData.RedfishEndpointFQDN, 
-        MACAddress:          mac,
-    }, nil
-}
+	var smdData SMDComponentEndpoint
+	if err := json.NewDecoder(resp.Body).Decode(&smdData); err != nil {
+		return nil, err
+	}
 
-type SMDComponentEndpoint struct {
-    ID                  string `json:"ID"`
-    RedfishEndpointFQDN string `json:"RedfishEndpointFQDN"` // This is the IP
-    RedfishSystemInfo   struct {
-        EthernetNICInfo []struct {
-            MACAddress string `json:"MACAddress"`
-        } `json:"EthernetNICInfo"`
-    } `json:"RedfishSystemInfo"`
-}
+	// Map the SMD data to our internal struct
+	mac := ""
+	if len(smdData.RedfishSystemInfo.EthernetNICInfo) > 0 {
+		mac = smdData.RedfishSystemInfo.EthernetNICInfo[0].MACAddress
+	}
 
-type SMDResponse struct {
-    ID                  string
-    RedfishEndpointFQDN string
-    MACAddress          string
+	return &SMDResponse{
+		ID:                  smdData.ID,
+		RedfishEndpointFQDN: smdData.RedfishEndpointFQDN,
+		MACAddress:          mac,
+	}, nil
 }
 
 // getPCSStatus calls PCS to get power status
 func (r *NodeReconciler) getPCSStatus(ctx context.Context, xname string) (string, error) {
-    client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	url := fmt.Sprintf("http://localhost:28007/v1/power-status?xname=%s", xname)
-	
-    req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -171,7 +153,6 @@ func (r *NodeReconciler) sendPCSTransition(ctx context.Context, xname, state str
 	url := "http://localhost:28007/v1/transitions"
 
 	// Capitalize state for PCS (on -> On, off -> Off)
-	// Simple helper to uppercase first letter
 	pcsState := strings.Title(strings.ToLower(state))
 	if state == "off" {
 		pcsState = "Off" // PCS often prefers "Off" or "Force-Off"
@@ -183,11 +164,11 @@ func (r *NodeReconciler) sendPCSTransition(ctx context.Context, xname, state str
 			{"xname": xname},
 		},
 	}
-	
+
 	data, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -195,15 +176,31 @@ func (r *NodeReconciler) sendPCSTransition(ctx context.Context, xname, state str
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		// Read body for error message
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("PCS error %d: %s", resp.StatusCode, string(body))
 	}
-	
+
 	return nil
 }
 
 // --- JSON Structs for External Services ---
+
+type SMDComponentEndpoint struct {
+	ID                  string `json:"ID"`
+	RedfishEndpointFQDN string `json:"RedfishEndpointFQDN"` // This is the IP
+	RedfishSystemInfo   struct {
+		EthernetNICInfo []struct {
+			MACAddress string `json:"MACAddress"`
+		} `json:"EthernetNICInfo"`
+	} `json:"RedfishSystemInfo"`
+}
+
+// Internal common struct
+type SMDResponse struct {
+	ID                  string
+	RedfishEndpointFQDN string
+	MACAddress          string
+}
 
 type PCSStatusResponse struct {
 	Status []struct {
